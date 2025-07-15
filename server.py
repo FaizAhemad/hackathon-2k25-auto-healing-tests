@@ -29,10 +29,9 @@ class ElementData(BaseModel):
 
 class HealingResponse(BaseModel):
     success: bool
-    status: str  # "PASSED", "HEALED", "FAILED", "NO_CHANGE"
+    status: str  # "PASSED", "HEALED", "FAILED"
     healed_selector: Optional[str] = None
     explanation: Optional[str] = None
-    info: Optional[str] = None  # For additional context like visibility state
     error: Optional[str] = None
     jira_url: Optional[str] = None
 
@@ -66,16 +65,8 @@ def find_best_selector(data: ElementData) -> dict:
     # Quick check if original selector exactly matches
     original_id = data.original_selector.startswith('#') and data.original_selector[1:]
     if original_id and original_id in data.element_attributes.get('id', ''):
-        # If element exists but is hidden, we'll still use the selector but indicate visibility state
-        if not data.is_visible:
-            return {
-                "status": "NO_CHANGE",
-                "selector": data.original_selector,
-                "info": "Element exists but is not visible",
-                "error": None
-            }
         return {
-            "status": "NO_CHANGE",
+            "status": "PASSED",
             "selector": data.original_selector,
             "error": None
         }
@@ -135,21 +126,12 @@ async def heal_element(data: ElementData):
                 jira_url=jira_url
             )
         
-        if result["status"] == "NO_CHANGE":
-            return HealingResponse(
-                success=True,
-                status=result["status"],
-                healed_selector=result["selector"],
-                info=result.get("info"),  # Include visibility state info if present
-                error=None
-            )
-        
-        # HEALED case
+        # HEALED or PASSED case
         return HealingResponse(
             success=True,
             status=result["status"],
             healed_selector=result["selector"],
-            explanation=f"Original selector '{data.original_selector}' was updated to '{result['selector']}'",
+            explanation=f"Original selector '{data.original_selector}' was updated to '{result['selector']}'" if result["status"] == "HEALED" else None,
             error=None
         )
 
@@ -177,6 +159,44 @@ async def health_check():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+
+@app.post("/api/test-healing")
+async def run_test_healing():
+    try:
+        # Import test cases from test_healing.py
+        from test_healing import test_cases
+        if not test_cases:
+            raise HTTPException(status_code=404, detail="No test cases found")
+        
+        results = []
+        for test_case in test_cases:
+            try:
+                # Call heal_element with each test case
+                response = await heal_element(ElementData(**test_case['data']))
+                
+                # Format the response
+                result = {
+                    "name": test_case['name'],
+                    "status": response.status,
+                    "original_selector": test_case['data']['original_selector'],
+                    "healed_selector": response.healed_selector,
+                    "error": response.error,
+                    "explanation": response.explanation
+                }
+                results.append(result)
+            except Exception as e:
+                results.append({
+                    "name": test_case['name'],
+                    "status": "FAILED",
+                    "original_selector": test_case['data']['original_selector'],
+                    "error": str(e)
+                })
+        
+        return results
+    except ImportError:
+        raise HTTPException(status_code=404, detail="Test cases file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
